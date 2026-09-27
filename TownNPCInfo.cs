@@ -6,49 +6,44 @@ namespace Census;
 
 internal class TownNPCInfo
 {
-    public int type;
-    public LocalizedText conditions;
+    public int Type { get; }
+    public LocalizedText Conditions { get; }
 
     public TownNPCInfo(int type, LocalizedText conditions = null)
     {
-        this.type = type;
-        this.conditions = conditions;
-        if (this.conditions == null)
+        Type = type;
+        Conditions = conditions ?? GetUnknownCondition(type);
+    }
+
+    private static LocalizedText GetUnknownCondition(int type)
+    {
+        if (type >= 0 && type < NPCID.Count)
         {
-            if (type < NPCID.Count)
-            {
-                string key = $"Mods.Census.SpawnConditions.{NPCID.Search.GetName(type)}";
-                if (Language.Exists(key))
-                    this.conditions = Language.GetText(key);
-                else
-                    this.conditions = Language.GetText("Mods.Census.SpawnConditions.Unknown");
-            }
-            else
-            {
-                // This shouldn't happen.
-                this.conditions = Language.GetText("Mods.Census.SpawnConditions.Unknown");
-            }
+            string key = $"Mods.Census.SpawnConditions.{NPCID.Search.GetName(type)}";
+            if (Language.Exists(key))
+                return Language.GetText(key);
         }
+
+        return Language.GetText("Mods.Census.SpawnConditions.Unknown");
     }
 
     internal TownNPCInfo(int type, string conditions)
     {
-        this.type = type;
-        if (!CensusConfigClient.Instance.DisableAutoLocalization)
-            this.conditions = ModContent.GetModNPC(type).GetLocalization("Census.SpawnCondition", () => conditions);
-        else
-            this.conditions = Language.GetText("Mods.Census.SpawnConditions.Unknown");
+        Type = type;
+        ModNPC modNPC = ModContent.GetModNPC(type);
+        Conditions = CensusConfigClient.Instance?.DisableAutoLocalization == true || modNPC is null
+            ? GetUnknownCondition(type)
+            : modNPC.GetLocalization("Census.SpawnCondition", () => conditions);
     }
 
     public TownNPCInfo(ModNPC modNPC)
     {
         // No localization provided, use automatic.
-        type = modNPC.Type;
+        Type = modNPC.Type;
 
         // Default value is English. Code will register automatically unless disabled.
-        if (!CensusConfigClient.Instance.DisableAutoLocalization)
-            conditions = modNPC.GetLocalization("Census.SpawnCondition", () => "Conditions unknown");
-        else
-            conditions = Language.GetText("Mods.Census.SpawnConditions.Unknown");
+        Conditions = CensusConfigClient.Instance?.DisableAutoLocalization == true
+            ? GetUnknownCondition(Type)
+            : modNPC.GetLocalization("Census.SpawnCondition", () => "Conditions unknown");
     }
 }

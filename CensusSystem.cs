@@ -21,7 +21,17 @@ internal class CensusSystem : ModSystem
     internal static CensusSystem instance;
     internal static bool calculated;
 
-    private LocalizedText Next;
+    private LocalizedText Next = null!;
+    private string hoverText = string.Empty;
+    internal List<TownNPCInfo> realTownNPCsInfos = [];
+    private readonly List<TownNPCInfo> modTownNPCsInfos = [];
+    private readonly List<TownNPCInfo> canSpawnTownNPCs = [];
+    private readonly List<TownNPCInfo> cannotSpawnTownNPCs = [];
+    private readonly List<TownNPCInfo> allNotSpawnedTownNPCs = [];
+    private readonly HashSet<int> presentTownNPCs = [];
+    private bool displayCacheValid;
+    private int lastNPCPresenceHash;
+    private int lastPrioritizedTownNPCType;
 
     public override void Load()
     {
@@ -40,45 +50,109 @@ internal class CensusSystem : ModSystem
 
     public override void Unload()
     {
+        IL_Main.UpdateTime_SpawnTownNPCs -= Main_UpdateTime_SpawnTownNPCs;
         instance = null;
+        Next = null!;
+        realTownNPCsInfos.Clear();
+        modTownNPCsInfos.Clear();
+        canSpawnTownNPCs.Clear();
+        cannotSpawnTownNPCs.Clear();
+        allNotSpawnedTownNPCs.Clear();
+        presentTownNPCs.Clear();
+        hoverText = string.Empty;
+        calculated = false;
+        displayCacheValid = false;
     }
 
     // Replace with On? Seems to run after everything anyway.
     private void Main_UpdateTime_SpawnTownNPCs(ILContext il)
     {
-        var c = new ILCursor(il);
-        c.GotoNext(i => i.MatchCall(typeof(NPCLoader), nameof(NPCLoader.CanTownNPCSpawn)));
-        c.Index++;
-        c.EmitDelegate(() =>
+        try
         {
-            calculated = true;
-            if (Main.dedServ)
+            var c = new ILCursor(il);
+            c.GotoNext(i => i.MatchCall(typeof(NPCLoader), nameof(NPCLoader.CanTownNPCSpawn)));
+            c.Index++;
+            c.EmitDelegate(() =>
             {
-                var packet = Mod.GetPacket();
-                packet.Write((byte)CensusMessageType.CensusInfo);
-                packet.Write(WorldGen.prioritizedTownNPCType);
-                packet.Write(Main.townNPCCanSpawn.Length);
-
-                for (int i = 0; i < Main.townNPCCanSpawn.Length; i += 8)
+                calculated = true;
+                displayCacheValid = false;
+                if (Main.dedServ)
                 {
-                    var bits = new BitsByte();
-                    for (int j = 0; j < 8 && j + i < Main.townNPCCanSpawn.Length; j++)
-                        bits[j] = Main.townNPCCanSpawn[j + i];
+                    var packet = Mod.GetPacket();
+                    packet.Write((byte)CensusMessageType.CensusInfo);
+                    packet.Write(WorldGen.prioritizedTownNPCType);
+                    packet.Write(Main.townNPCCanSpawn.Length);
 
-                    packet.Write(bits);
+                    for (int i = 0; i < Main.townNPCCanSpawn.Length; i += 8)
+                    {
+                        var bits = new BitsByte();
+                        for (int j = 0; j < 8 && j + i < Main.townNPCCanSpawn.Length; j++)
+                            bits[j] = Main.townNPCCanSpawn[j + i];
+
+                        packet.Write(bits);
+                    }
+
+                    packet.Send();
                 }
-
-                packet.Send();
-            }
-        });
+            });
+        }
+        catch (Exception exception)
+        {
+            Mod.Logger.Error($"Census: Failed to install the town NPC spawn hook: {exception}");
+        }
     }
 
     public override void OnWorldLoad()
     {
         calculated = false;
+        hoverText = string.Empty;
+        displayCacheValid = false;
     }
 
-    string hoverText = "";
+    private void UpdateDisplayCache()
+    {
+        int npcPresenceHash = 17;
+        foreach (NPC npc in Main.npc)
+        {
+            if (npc.active && npc.townNPC)
+                npcPresenceHash = unchecked(npcPresenceHash * 31 + npc.type);
+        }
+
+        int prioritizedTownNPCType = WorldGen.prioritizedTownNPCType;
+        if (displayCacheValid && npcPresenceHash == lastNPCPresenceHash && prioritizedTownNPCType == lastPrioritizedTownNPCType)
+            return;
+
+        presentTownNPCs.Clear();
+        foreach (NPC npc in Main.npc)
+        {
+            if (npc.active && npc.townNPC)
+                presentTownNPCs.Add(npc.type);
+        }
+
+        canSpawnTownNPCs.Clear();
+        cannotSpawnTownNPCs.Clear();
+        allNotSpawnedTownNPCs.Clear();
+
+        foreach (TownNPCInfo townNPCInfo in realTownNPCsInfos)
+        {
+            int type = townNPCInfo.Type;
+            if (presentTownNPCs.Contains(type))
+                continue;
+
+            if (prioritizedTownNPCType == type)
+                canSpawnTownNPCs.Insert(0, townNPCInfo);
+            else if (type >= 0 && type < Main.townNPCCanSpawn.Length && Main.townNPCCanSpawn[type])
+                canSpawnTownNPCs.Add(townNPCInfo);
+            else
+                cannotSpawnTownNPCs.Add(townNPCInfo);
+        }
+
+        allNotSpawnedTownNPCs.AddRange(canSpawnTownNPCs);
+        allNotSpawnedTownNPCs.AddRange(cannotSpawnTownNPCs);
+        lastNPCPresenceHash = npcPresenceHash;
+        lastPrioritizedTownNPCType = prioritizedTownNPCType;
+        displayCacheValid = true;
+    }
 
     public override void ModifyInterfaceLayers(List<GameInterfaceLayer> layers)
     {
@@ -124,40 +198,30 @@ internal class CensusSystem : ModSystem
                     float oldInventoryScale = Main.inventoryScale;
                     Main.inventoryScale = 0.85f;
 
-                    int mH = 0;
-                    if (Main.mapEnabled)
-                    {
-                        if (!Main.mapFullscreen && Main.mapStyle == 1)
-                            mH = 256;
-                        if (mH + Main.instance.RecommendedEquipmentAreaPushUp > Main.screenHeight)
-                            mH = Main.screenHeight - Main.instance.RecommendedEquipmentAreaPushUp;
-                    }
+                     try
+                     {
+                         hoverText = string.Empty;
 
-                    List<TownNPCInfo> canSpawns = [];
-                    List<TownNPCInfo> cantSpawns = [];
+                         int mH = 0;
+                         if (Main.mapEnabled)
+                         {
+                             if (!Main.mapFullscreen && Main.mapStyle == 1)
+                                 mH = 256;
+                             if (mH + Main.instance.RecommendedEquipmentAreaPushUp > Main.screenHeight)
+                                 mH = Main.screenHeight - Main.instance.RecommendedEquipmentAreaPushUp;
+                         }
 
-                    foreach (TownNPCInfo townNPCInfo in realTownNPCsInfos)
-                    {
-                        bool missing = !NPC.AnyNPCs(townNPCInfo.type);
-                        if (missing)
-                        {
-                            if (WorldGen.prioritizedTownNPCType == townNPCInfo.type)
-                                canSpawns.Insert(0, townNPCInfo);
-                            else if (Main.townNPCCanSpawn[townNPCInfo.type])
-                                canSpawns.Add(townNPCInfo);
-                            else
-                                cantSpawns.Add(townNPCInfo);
-                        }
-                    }
+                         UpdateDisplayCache();
 
-                    int drawCount = 0;
-                    string text = "";
-                    int rowOffsetY = 0;
-                    int colOffsetX = 0;
+                         int drawCount = 0;
+                         string text = string.Empty;
+                         int rowOffsetY = 0;
+                         int colOffsetX = 0;
+                         Texture2D inventoryTexture = TextureAssets.InventoryBack.Value;
+                         Texture2D inventoryBackTexture = TextureAssets.InventoryBack7.Value;
 
-                    var allNotSpawned = canSpawns.Concat(cantSpawns).ToList();
-                    for (drawCount = 0; drawCount < total + allNotSpawned.Count; drawCount++)
-                    {
+                         for (drawCount = 0; drawCount < total + allNotSpawnedTownNPCs.Count; drawCount++)
+                         {
                         int drawX = Main.screenWidth - 64 - 28 + colOffsetX;
                         int drawY = (int)(174 + mH + drawCount * 56 * Main.inventoryScale) + rowOffsetY;
                         Color white = new(100, 100, 100, 100);
@@ -171,10 +235,13 @@ internal class CensusSystem : ModSystem
                         if (drawCount < total)
                             continue;
 
-                        TownNPCInfo t = allNotSpawned[drawCount - total];
-                        int missingNPCType = t.type;
+                         TownNPCInfo t = allNotSpawnedTownNPCs[drawCount - total];
+                        int missingNPCType = t.Type;
                         int i = NPC.TypeToDefaultHeadIndex(missingNPCType);
-                        if (Main.mouseX >= drawX && Main.mouseX <= drawX + TextureAssets.InventoryBack.Value.Width * Main.inventoryScale && Main.mouseY >= drawY && Main.mouseY <= drawY + TextureAssets.InventoryBack.Value.Height * Main.inventoryScale)
+                         if (i < 0 || i >= TextureAssets.NpcHead.Length)
+                             continue;
+
+                         if (Main.mouseX >= drawX && Main.mouseX <= drawX + inventoryTexture.Width * Main.inventoryScale && Main.mouseY >= drawY && Main.mouseY <= drawY + inventoryTexture.Height * Main.inventoryScale)
                         {
                             Main.mouseText = true;
                             text = Lang.GetNPCNameValue(missingNPCType);
@@ -182,18 +249,17 @@ internal class CensusSystem : ModSystem
                                 text += $"\n{Next.Value}";
                             else
                             {
-                                if (!CensusConfigClient.Instance.DisableConditionsText)
+                                 if (CensusConfigClient.Instance is not { DisableConditionsText: true })
                                 {
                                     if (unknown)
                                         text += $" - Townspeople spawn during the day";
                                     else
-                                        text += $" - {t.conditions.Value}";
+                                        text += $" - {t.Conditions.Value}";
                                 }
                             }
                         }
-                        Texture2D texture = TextureAssets.InventoryBack7.Value;
                         Color white2 = Main.inventoryBack;
-                        Main.spriteBatch.Draw(texture, new Vector2(drawX, drawY), new Rectangle(0, 0, TextureAssets.InventoryBack.Value.Width, TextureAssets.InventoryBack.Value.Height), white2, 0f, default, Main.inventoryScale, SpriteEffects.None, 0f);
+                         Main.spriteBatch.Draw(inventoryBackTexture, new Vector2(drawX, drawY), new Rectangle(0, 0, inventoryTexture.Width, inventoryTexture.Height), white2, 0f, default, Main.inventoryScale, SpriteEffects.None, 0f);
                         white = Color.White;
                         float scale = 1f;
                         float maxDimension = Math.Min(TextureAssets.NpcHead[i].Value.Width, TextureAssets.NpcHead[i].Value.Height);
@@ -202,10 +268,13 @@ internal class CensusSystem : ModSystem
                         Main.spriteBatch.Draw(TextureAssets.NpcHead[i].Value, new Vector2(drawX + 26f * Main.inventoryScale, drawY + 26f * Main.inventoryScale), new Rectangle(0, 0, TextureAssets.NpcHead[i].Value.Width, TextureAssets.NpcHead[i].Value.Height), white, 0f, new Vector2(TextureAssets.NpcHead[i].Value.Width / 2, TextureAssets.NpcHead[i].Value.Height / 2), scale, SpriteEffects.None, 0f);
 
                         ChatManager.DrawColorCodedStringWithShadow(Main.spriteBatch, FontAssets.ItemStack.Value, !calculated ? "?" : Main.townNPCCanSpawn[missingNPCType] ? "✓" : "X", new Vector2(drawX + 26f * Main.inventoryScale, drawY + 26f * Main.inventoryScale) + new Vector2(6f, 6f), !calculated ? Color.MediumPurple : Main.townNPCCanSpawn[missingNPCType] ? Color.LightGreen : Color.LightSalmon, 0f, Vector2.Zero, new Vector2(0.7f));
-                    }
-                    hoverText = text;
-
-                    Main.inventoryScale = oldInventoryScale;
+                         }
+                         hoverText = text;
+                     }
+                     finally
+                     {
+                         Main.inventoryScale = oldInventoryScale;
+                     }
                     return true;
                 },
                 InterfaceScaleType.UI));
@@ -214,14 +283,16 @@ internal class CensusSystem : ModSystem
                 "Census: Census Arrows",
                 delegate
                 {
-                    if (UILinkPointNavigator.Shortcuts.NPCS_LastHovered > -1 && CensusConfigClient.Instance.ShowLocatingArrow)
+                     if (UILinkPointNavigator.Shortcuts.NPCS_LastHovered > -1 && UILinkPointNavigator.Shortcuts.NPCS_LastHovered < Main.npc.Length && CensusConfigClient.Instance is not { ShowLocatingArrow: false } && TextureAssets.Cursors.Length > 1)
                     {
                         var npc = Main.npc[UILinkPointNavigator.Shortcuts.NPCS_LastHovered];
+                         if (!npc.active)
+                             return true;
                         var headIndex = NPC.TypeToDefaultHeadIndex(npc.type); // If NPCS_LastHovered is 0, it could also be the housing query button.
                         Vector2 playerCenter = Main.LocalPlayer.Center + new Vector2(0, Main.LocalPlayer.gfxOffY);
                         var vector = npc.Center - playerCenter;
                         var distance = vector.Length();
-                        if (headIndex > -1 && distance > 40)
+                         if (headIndex > -1 && headIndex < TextureAssets.NpcHead.Length && distance > 40)
                         {
                             var headTexture = TextureAssets.NpcHead[headIndex].Value;
                             var offset = Vector2.Normalize(vector) * Math.Min(70, distance - 20);
@@ -242,8 +313,6 @@ internal class CensusSystem : ModSystem
         }
     }
 
-    internal List<TownNPCInfo> realTownNPCsInfos;
-    readonly List<TownNPCInfo> modTownNPCsInfos = [];
     public override void PostAddRecipes()
     {
         // By this point, all NPCs of all mods are loaded.
@@ -288,45 +357,69 @@ internal class CensusSystem : ModSystem
             new(NPCID.TownSlimeCopper),
         ];
 
+        Dictionary<int, TownNPCInfo> suppliedTownNPCs = [];
+        foreach (TownNPCInfo townNPCInfo in modTownNPCsInfos)
+            suppliedTownNPCs[townNPCInfo.Type] = townNPCInfo;
+
         foreach (ModNPC npc in ModContent.GetContent<ModNPC>())
         {
-            if (npc.NPC.townNPC && NPC.TypeToDefaultHeadIndex(npc.NPC.type) >= 0 && !npc.TownNPCStayingHomeless)
+            int npcType = npc.Type;
+            if (npc.NPC.townNPC && npcType >= 0 && npcType < Main.townNPCCanSpawn.Length && NPC.TypeToDefaultHeadIndex(npcType) >= 0 && !npc.TownNPCStayingHomeless)
             {
-                var modSuppliedTownNPC = modTownNPCsInfos.FirstOrDefault(x => x.type == npc.NPC.type);
-                if (modSuppliedTownNPC != null)
+                if (suppliedTownNPCs.TryGetValue(npcType, out TownNPCInfo? modSuppliedTownNPC))
                     realTownNPCsInfos.Add(modSuppliedTownNPC);
                 else
                     realTownNPCsInfos.Add(new TownNPCInfo(npc));
             }
         }
+
+        displayCacheValid = false;
     }
 
     internal void HandlePacket(BinaryReader reader, int whoAmI)
     {
-        var msgType = (CensusMessageType)reader.ReadByte();
-        switch (msgType)
+        try
         {
-            case CensusMessageType.CensusInfo:
-                if (Main.netMode != NetmodeID.MultiplayerClient)
-                    return;
+            var msgType = (CensusMessageType)reader.ReadByte();
+            switch (msgType)
+            {
+                case CensusMessageType.CensusInfo:
+                    if (Main.netMode != NetmodeID.MultiplayerClient)
+                        return;
 
-                WorldGen.prioritizedTownNPCType = reader.ReadInt32();
-                int count = reader.ReadInt32();
-                if (count != Main.townNPCCanSpawn.Length)
-                    Mod.Logger.Error("Census: Somehow Main.townNPCCanSpawn.Length incorrect");
+                    WorldGen.prioritizedTownNPCType = reader.ReadInt32();
+                    int count = reader.ReadInt32();
+                    if (count < 0 || count > 4096)
+                    {
+                        Mod.Logger.Error($"Census: Invalid town NPC spawn array length: {count}");
+                        return;
+                    }
 
-                for (int i = 0; i < Main.townNPCCanSpawn.Length; i += 8)
-                {
-                    BitsByte bits = reader.ReadByte();
-                    for (int j = 0; j < 8 && j + i < Main.townNPCCanSpawn.Length; j++)
-                        Main.townNPCCanSpawn[j + i] = bits[j];
-                }
+                    if (count != Main.townNPCCanSpawn.Length)
+                        Mod.Logger.Warn("Census: Received a town NPC spawn array with an unexpected length");
 
-                calculated = true;
-                break;
-            default:
-                Mod.Logger.Warn("Ceusus: Unknown Message type: " + msgType);
-                break;
+                    for (int i = 0; i < count; i += 8)
+                    {
+                        BitsByte bits = reader.ReadByte();
+                        for (int j = 0; j < 8 && j + i < count; j++)
+                        {
+                            int index = i + j;
+                            if (index < Main.townNPCCanSpawn.Length)
+                                Main.townNPCCanSpawn[index] = bits[j];
+                        }
+                    }
+
+                    calculated = true;
+                    displayCacheValid = false;
+                    break;
+                default:
+                    Mod.Logger.Warn("Census: Unknown message type: " + msgType);
+                    break;
+            }
+        }
+        catch (EndOfStreamException exception)
+        {
+            Mod.Logger.Error($"Census: Truncated packet: {exception.Message}");
         }
     }
 
@@ -334,28 +427,57 @@ internal class CensusSystem : ModSystem
     {
         try
         {
-            // Where should other mods call? They could call at end of Load?
-            string message = args[0] as string;
-            if (message == "TownNPCCondition")
+            if (args is null || args.Length == 0 || args[0] is not string message)
             {
-                int type = Convert.ToInt32(args[1]);
-                if (args.Length >= 3 && args[2] is string conditionString)
-                {
-                    modTownNPCsInfos.Add(new TownNPCInfo(type, conditionString));
-                    throw new Exception($"Call Error: The 2nd parameter of TownNPCCondition is now LocalizedText and is optional. Also, localization is now automatic, keys will appear in your hjson files. This TownNPCCondition Mod.Call is only needed if using LocalizedText.WithFormatArgs");
-                }
-
-                LocalizedText condition = args[2] as LocalizedText;
-                modTownNPCsInfos.Add(new TownNPCInfo(type, condition));
-                return "Success";
+                Mod.Logger.Error("Census Call Error: A message name is required");
+                return "Failure";
             }
-            else
+
+            if (message != "TownNPCCondition")
+            {
                 Mod.Logger.Error("Census Call Error: Unknown Message: " + message);
+                return "Failure";
+            }
+
+            if (args.Length < 2)
+            {
+                Mod.Logger.Error("Census Call Error: TownNPCCondition requires an NPC type");
+                return "Failure";
+            }
+
+            int type = Convert.ToInt32(args[1]);
+            if (type < 0)
+            {
+                Mod.Logger.Error("Census Call Error: NPC type must not be negative");
+                return "Failure";
+            }
+
+            if (args.Length >= 3 && args[2] is string conditionString)
+            {
+                AddTownNPCCondition(new TownNPCInfo(type, conditionString));
+                throw new Exception("Call Error: The 2nd parameter of TownNPCCondition is now LocalizedText and is optional. Also, localization is now automatic, keys will appear in your hjson files. This TownNPCCondition Mod.Call is only needed if using LocalizedText.WithFormatArgs");
+            }
+
+            if (args.Length >= 3 && args[2] is not null and not LocalizedText)
+            {
+                Mod.Logger.Error("Census Call Error: The condition must be LocalizedText or omitted");
+                return "Failure";
+            }
+
+            AddTownNPCCondition(new TownNPCInfo(type, args.Length >= 3 ? args[2] as LocalizedText : null));
+            return "Success";
         }
         catch (Exception e)
         {
             Mod.Logger.Error("Census Call Error: " + e.StackTrace + e.Message);
         }
         return "Failure";
+    }
+
+    private void AddTownNPCCondition(TownNPCInfo townNPCInfo)
+    {
+        modTownNPCsInfos.RemoveAll(existing => existing.Type == townNPCInfo.Type);
+        modTownNPCsInfos.Add(townNPCInfo);
+        displayCacheValid = false;
     }
 }

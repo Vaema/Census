@@ -1,5 +1,5 @@
 ﻿using System;
-using System.Linq;
+using System.Collections.Generic;
 using Terraria;
 using Terraria.ModLoader;
 
@@ -15,12 +15,23 @@ internal class TownProgressionCommand : ModCommand
 
     public override void Action(CommandCaller caller, string input, string[] args)
     {
-        foreach (var townNPCInfo in CensusSystem.instance.realTownNPCsInfos)
+        if (CensusSystem.instance?.realTownNPCsInfos is not { } townNPCInfos)
+            return;
+
+        HashSet<int> presentTownNPCs = [];
+        foreach (NPC npc in Main.npc)
         {
-            bool present = Main.npc.Any(x => x.active && x.type == townNPCInfo.type);
-            bool spawnable = Main.townNPCCanSpawn[townNPCInfo.type];
+            if (npc.active && npc.townNPC)
+                presentTownNPCs.Add(npc.type);
+        }
+
+        foreach (TownNPCInfo townNPCInfo in townNPCInfos)
+        {
+            int type = townNPCInfo.Type;
+            bool present = presentTownNPCs.Contains(type);
+            bool spawnable = type >= 0 && type < Main.townNPCCanSpawn.Length && Main.townNPCCanSpawn[type];
             Console.ForegroundColor = present ? ConsoleColor.Green : (spawnable ? ConsoleColor.Yellow : ConsoleColor.Red);
-            Console.WriteLine($"{Lang.GetNPCNameValue(townNPCInfo.type)}");
+            Console.WriteLine(Lang.GetNPCNameValue(type));
         }
         Console.ResetColor();
     }

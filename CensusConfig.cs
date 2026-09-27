@@ -9,7 +9,7 @@ class CensusConfigClient : ModConfig
 {
     public override ConfigScope Mode => ConfigScope.ClientSide;
 
-    public static CensusConfigClient Instance;
+    public static CensusConfigClient Instance = null!;
 
     [DefaultValue(true)]
     public bool ShowLocatingArrow;
@@ -17,6 +17,7 @@ class CensusConfigClient : ModConfig
     [DefaultValue(typeof(Color), "173, 255, 47, 255")]
     public Color ArrowColor;
 
+    [DefaultValue(false)]
     public bool DisableConditionsText;
 
     [Header("DeveloperOptions")]
